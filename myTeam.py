@@ -1,0 +1,851 @@
+# baselineTeam.py
+# ---------------
+# Licensing Information:  You are free to use or extend these projects for
+# educational purposes provided that (1) you do not distribute or publish
+# solutions, (2) you retain this notice, and (3) you provide clear
+# attribution to UC Berkeley, including a link to http://ai.berkeley.edu.
+#
+# Attribution Information: The Pacman AI projects were developed at UC Berkeley.
+# The core projects and autograders were primarily created by John DeNero
+# (denero@cs.berkeley.edu) and Dan Klein (klein@cs.berkeley.edu).
+# Student side autograding was added by Brad Miller, Nick Hay, and
+# Pieter Abbeel (pabbeel@cs.berkeley.edu).
+
+
+# baselineTeam.py
+# ---------------
+# Licensing Information: Please do not distribute or publish solutions to this
+# project. You are free to use and extend these projects for educational
+# purposes. The Pacman AI projects were developed at UC Berkeley, primarily by
+# John DeNero (denero@cs.berkeley.edu) and Dan Klein (klein@cs.berkeley.edu).
+# For more info, see http://inst.eecs.berkeley.edu/~cs188/sp09/pacman.html
+import copy
+
+from captureAgents import CaptureAgent
+import distanceCalculator
+import random, time, util, sys
+from game import Directions, Actions
+import game
+from util import nearestPoint
+
+
+#################
+# Team creation #
+#################
+
+def createTeam(firstIndex, secondIndex, isRed,
+               first='OffensiveReflexAgent', second='DefensiveReflexAgent', numTraining=0):
+    """
+This function should return a list of two agents that will form the
+team, initialized using firstIndex and secondIndex as their agent
+index numbers.  isRed is True if the red team is being created, and
+will be False if the blue team is being created.
+
+As a potentially helpful development aid, this function can take
+additional string-valued keyword arguments ("first" and "second" are
+such arguments in the case of this function), which will come from
+the --redOpts and --blueOpts command-line arguments to capture.py.
+For the nightly contest, however, your team will be created without
+any extra arguments, so you should make sure that the default
+behavior is what you want for the nightly contest.
+"""
+    return [eval(first)(firstIndex), eval(second)(secondIndex)]
+
+
+##########
+# Agents #
+##########
+
+class ReflexCaptureAgent(CaptureAgent):
+    """
+A base class for reflex agents that chooses score-maximizing actions
+"""
+
+    def registerInitialState(self, gameState):
+        CaptureAgent.registerInitialState(self, gameState)
+        self.start = gameState.getAgentPosition(self.index)
+        self.midWidth = gameState.data.layout.width // 2
+        self.height = gameState.data.layout.height
+        self.retreat = False
+        self.taken = None
+        self.totalFoodNum = len(self.getFood(gameState).asList())
+
+        # We are using bfs search to locate all the safe and dangerous food once at the start of the game and store them in the list below
+        bfs = BFS(gameState, self)
+        self.safeFood = bfs.getSafeFood(self.getFood(gameState).asList())
+
+
+    def getNumFoodEaten(self):
+        """
+            Get the number of food consumed at a given game state (as of the end of the previous move)
+        """
+        eaten = 0
+        # Make sure that the initial state has been registered so as we only see our food.
+        # Chances are in the first four observations we will not have consumed any food.
+        if len(self.observationHistory) > 3:
+            currGameState = self.getCurrentObservation()
+            currNumFood = len(self.getFood(currGameState).asList())
+            startFood = self.getFood(self.observationHistory[3]).asList()
+            # print("Start food 0: ", startFood)
+            # if len(self.observationHistory) > 1:
+            #     print("Food at ", len(self.observationHistory), " observation: ", self.getFood(currGameState).asList())
+            eaten = len(startFood)-currNumFood
+        return eaten
+
+    def boundariesPosition(self, gameState, distance):
+        ''''
+    Return a list of boundary position. Accepts a parameter "distance"
+    to locate the required position from the mid field of the map. Note that the boundary here indicates coordinate that
+    allow pacman that carrys food to score if reached.
+    '''
+        boundaries = []
+
+        # Initialize the x-coordinate and change the position based on the parameter received
+        if not self.red:
+            x = self.midWidth + distance
+        else:
+            x = self.midWidth - distance - 1
+
+        # Store all the available position from top to bottom in a list
+        for y in range(self.height):
+            boundaries.append((x, y))
+
+        # If the position is not a wall, add it to the final list
+        boundariesPosition = []
+        for boundary in boundaries:
+            if not gameState.hasWall(boundary[0], boundary[1]):
+                boundariesPosition.append(boundary)
+        return boundariesPosition
+
+    def getSuccessor(self, gameState, action):
+        """
+Finds the next successor which is a grid position (location tuple).
+"""
+        successor = gameState.generateSuccessor(self.index, action)
+        pos = successor.getAgentState(self.index).getPosition()
+        if pos != nearestPoint(pos):
+            # Only half a grid position was covered
+            return successor.generateSuccessor(self.index, action)
+        else:
+            return successor
+
+    def nullHeuristic(self, state, problem=None):
+        return 0
+
+    def aStarSearch(self, problem, gameState, heuristic=nullHeuristic):
+
+        """
+        This is a general a-star search function. It is taken from the P1 assignment.
+        """
+        frontier = util.PriorityQueue()
+        frontier.push((problem.getStartState(), [], 0), 0)
+        if problem.isGoalState(problem.getStartState()):
+            return []
+        reachedState = []
+        while not frontier.isEmpty():
+            # pop node and check goal
+            currState, actions, totalCost = frontier.pop()
+            # add node to visited list
+            if currState not in reachedState:
+                reachedState.append(currState)
+                if problem.isGoalState(currState):
+                    return actions
+                # expand successors of current node
+                successors = problem.getSuccessors(currState)
+                for (nextState, direction, cost) in successors:
+                    currentPath = list(actions)
+                    # to make sure visited node is not added to list
+                    if nextState not in reachedState:
+                        currentPath.append(direction)
+                        # evaluation function is inserted here [f(n) = g(n) + h(n)]
+                        heuristicCost = totalCost + cost + heuristic(nextState, gameState)
+                        successor_node = (nextState, currentPath, totalCost + cost)
+                        frontier.push(successor_node, heuristicCost)
+
+        return []
+
+    def generalHeuristic(self, state, gameState):
+        """
+We use this heuristic function to determine how dangerous the next move is.
+The shorter the distance of pacman and ghost, the higher the heuristic value
+"""
+        heuristic = 0
+
+        # the heuristic below allows our pacmen to avoid ghost in opponent's side of the map
+        if self.getMinGhostDistance(gameState) != None:
+
+            # Get all the opponents on map
+            opponents = []
+            for opponent in self.getOpponents(gameState):
+                opponents.append(gameState.getAgentState(opponent))
+            ghosts = []
+            for opponent in opponents:
+                if not opponent.isPacman and opponent.getPosition() != None and opponent.scaredTimer < 2:
+                    ghosts.append(opponent)
+
+            if ghosts != None and len(ghosts) > 0:
+                ghostsPosition = []
+                ghostsDistance = []
+
+                # get position of ghost
+                for ghost in ghosts:
+                    ghostsPosition.append(ghost.getPosition())
+
+                # get distance of pacman and ghosts
+                for ghostPosition in ghostsPosition:
+                    if state != None and ghostPosition != None:
+                        ghostsDistance.append(self.getMazeDistance(state, ghostPosition))
+
+                # get shortest ghost distance
+                if ghostsDistance != []:
+                    ghostDistance = min(ghostsDistance)
+
+                    # the shorter the distance of ghost and pacman, the higher the heuristic. The value increases exponentially.
+                    if ghostDistance < 2:
+                        heuristic = pow((5 - ghostDistance), 5)
+
+                # The heuristic below is to avoid pacmen to repeat the same move if it is stuck in a certain area
+                # check observation history to see if pacman has been repeating the same states for the last 14 moves
+                if len(self.observationHistory) > 14:
+                    previousObservations = self.observationHistory[-14:]
+                    uniquePreviousObservations = set()
+
+                    # store all observations in a set to get a list of unique position
+                    for obs in previousObservations:
+                        uniquePreviousObservations.add(obs.getAgentState(self.index).getPosition())
+
+                    # if pacman has not visited more than 4 states in 14 moves, we assume it is stuck.
+                    if len(uniquePreviousObservations) < 5:
+                        if state in uniquePreviousObservations:
+                            # the heuristic is equals to the heuristic when the pacman and ghost is in the same state.
+                            # This allows pacman to suicide to the ghost if necessary or choose another path
+                            heuristic += pow(5, 5)
+
+        # the heuristic below allows our ghost to avoid pacmen in our side of the map when feared
+        if self.getMinPacmanDistance(gameState) != None and gameState.getAgentState(self.index).scaredTimer > 0:
+
+            # Get all the opponents on map
+            opponents = []
+            for opponent in self.getOpponents(gameState):
+                opponents.append(gameState.getAgentState(opponent))
+            pacmens = []
+            for opponent in opponents:
+                if opponent.isPacman and opponent.getPosition() != None:
+                    pacmens.append(opponent)
+
+            if pacmens != None and len(pacmens) > 0:
+                pacmensPosition = []
+                pacmensDistance = []
+
+                # get position of opponent pacman
+                for pacmen in pacmens:
+                    pacmensPosition.append(pacmen.getPosition())
+
+                # get distance of pacman and ghosts
+                for pacmenPosition in pacmensPosition:
+                    if state != None and pacmenPosition != None:
+                        pacmensDistance.append(self.getMazeDistance(state, pacmenPosition))
+
+                # get shortest pacmen distance
+                if pacmensDistance != []:
+                    pacmenDistance = min(pacmensDistance)
+
+                    # the shorter the distance of ghost and pacman, the higher the heuristic. The value increases exponentially.
+                    if pacmenDistance < 2:
+                        heuristic += pow((5 - pacmenDistance), 5)
+
+        return heuristic
+
+    def manhattanHeuristic(self, state, gameState):
+        """
+        A Manhattan Distance Heuristic that works for food in the aStarSearch function.
+        """
+        xy1 = state
+        return min([abs(xy1[0] - xy2[0]) + abs(xy1[1] - xy2[1]) for xy2 in self.getFood(gameState).asList()])
+
+    def getMinGhostDistance(self, gameState):
+        ''''
+    return nearest ghost position and its distance with pacman
+    '''
+        ghostsDistance = dict()
+        ghostsPosDist = None
+        opponents = []
+
+        # get all opponent's ghost an store it in a dictionary array
+        for opponent in self.getOpponents(gameState):
+            opponents.append(gameState.getAgentState(opponent))
+        ghosts = []
+        for opponent in opponents:
+            if not opponent.isPacman and opponent.getPosition() != None:
+                ghosts.append(opponent)
+        if len(ghosts) > 0:
+            for ghost in ghosts:
+                ghostDist = self.getMazeDistance(gameState.getAgentState(self.index).getPosition(), ghost.getPosition())
+                ghostsDistance.update({ghost: ghostDist})
+
+            # find ghost position with the minimum distance from pacman
+            ghostsPosDist = min(ghostsDistance, key=ghostsDistance.get), ghostsDistance[
+                min(ghostsDistance, key=ghostsDistance.get)]
+
+        return ghostsPosDist
+
+    def getMinPacmanDistance(self, gameState):
+        ''''
+    return nearest Pacman position and its distance with ghost
+    '''
+        pacmanDistance = dict()
+        pacmanPosDist = None
+        opponents = []
+
+        # get all opponent's pacman an store it in a dictionary array
+        for opponent in self.getOpponents(gameState):
+            opponents.append(gameState.getAgentState(opponent))
+        pacmans = []
+        for opponent in opponents:
+            if opponent.isPacman and opponent.getPosition() != None:
+                pacmans.append(opponent)
+        if len(pacmans) > 0:
+            for pacman in pacmans:
+                pacmanDist = self.getMazeDistance(gameState.getAgentState(self.index).getPosition(),
+                                                  pacman.getPosition())
+                pacmanDistance.update({pacman: pacmanDist})
+            # find opponent's pacman position with the minimum distance from our pacman
+            pacmanPosDist = min(pacmanDistance, key=pacmanDistance.get), pacmanDistance[
+                min(pacmanDistance, key=pacmanDistance.get)]
+        return pacmanPosDist
+
+    def findMinHomeBoundaryDist(self, gameState):
+        ''''
+    return the distance of the agent and the nearest home boundary
+    '''
+
+        boundariesPosition = self.boundariesPosition(gameState, 1)
+        distance = []
+        for boundaryPosition in boundariesPosition:
+            distance.append(self.getMazeDistance(boundaryPosition, gameState.getAgentState(self.index).getPosition()))
+
+        return min(distance)
+
+    def opponentScaredTimer(self, gameState):
+        """
+    Return opponent's scared timer
+    """
+        opponentsScaredTime = 0
+        opponents = [opponent for opponent in self.getOpponents(gameState) if
+                     gameState.getAgentState(opponent).scaredTimer > 1]
+        for opponent in opponents:
+            opponentsScaredTime = gameState.getAgentState(opponent).scaredTimer
+        return opponentsScaredTime
+
+    def getMinFoodTakenDistance(self, gameState):
+        '''
+    returns nearest recently taken food position
+    '''
+        preState = self.getPreviousObservation()
+        preFood = self.getFoodYouAreDefending(preState)
+        crntFood = self.getFoodYouAreDefending(gameState)
+
+        # Checks if food has been taken
+        if len(crntFood.asList()) < len(preFood.asList()):
+            for food in preFood.asList():
+                if food not in crntFood.asList():
+                    return food
+
+        return None
+
+    def checkFoodEatenIn300moves(self, gameState):
+        """
+        Return false if pacman has not collect any food successfully in the past 300 moves
+        """
+        if gameState.data.timeleft < 900:
+            if len(self.getFood(gameState).asList()) == self.totalFoodNum:
+                return False
+        return True
+
+
+
+class OffensiveReflexAgent(ReflexCaptureAgent):
+    """
+A reflex agent that seeks food. This is an agent
+we give you to get an idea of what an offensive agent might look like,
+but it is by no means the best or only way to build an offensive agent.
+"""
+
+    def chooseAction(self, gameState):
+        """
+    Update safe and dangerous food after every pacman action. The codes below can reduce computational work by
+    initialize all the safe and dangerous food at the start of the game and compare it with the current food left on
+    map instead of using bfs to search for safe and dangerous food after every pacman action.
+    """
+        currSafeFood = [food for food in self.getFood(gameState).asList() if food in self.safeFood]
+        self.safeFood = copy.deepcopy(currSafeFood)
+
+        """
+    Decision Tree
+    """
+        # Variables
+        minPacmanDist = self.getMinPacmanDistance(gameState)
+        agentState = gameState.getAgentState(self.index)
+        numOfCapsules = self.getCapsules(gameState)
+        foodList = self.getFood(gameState).asList()
+        minGhostDist = self.getMinGhostDistance(gameState)
+        minHomeBoundaryDist = self.findMinHomeBoundaryDist(gameState)
+        gameTimeLeft = gameState.data.timeleft
+
+        # Problems
+        if minPacmanDist is not None:
+            hunter = Hunter(gameState, self, self.index, minPacmanDist[0])
+        else:
+            hunter = None
+        capsules = Capsules(gameState, self, self.index)
+        safeFood = SafeFood(gameState, self, self.index)
+        food = SearchFood(gameState, self, self.index)
+        escape = Escape(gameState, self, self.index)
+        returnHome = Return(gameState, self, self.index)
+
+
+        # Search Capsules problem
+        # This problem is chosen when pacman is not carrying any food, there are still capsules and at least 3 food on
+        # the map and opponents are scared for less than 10 moves.
+        if len(numOfCapsules) != 0:
+            if (len(self.safeFood) <= 0 and self.opponentScaredTimer(gameState) < 10 and len(foodList) > 2) or not self.checkFoodEatenIn300moves(gameState):
+                return self.aStarSearch(capsules, gameState, self.generalHeuristic)[0]
+
+        # Search Safe Food problem
+        # This problem is chosen if there is no more capsules on the map and pacman is not carrying any food
+        if agentState.numCarrying == 0 and (len(self.safeFood) >= 1):
+            return self.aStarSearch(safeFood, gameState, self.generalHeuristic)[0]
+
+        # Search Food problem
+        # This problem is chosen if there is no more capsules and safe food on the map while pacman is not carrying any food
+        if len(self.safeFood) == 0 and agentState.numCarrying == 0 and len(foodList) != 0:
+            return self.aStarSearch(food, gameState, self.generalHeuristic)[0]
+
+        # Escape problem
+        # This problem is chosen if opponent's ghost is within 5 maze distance from pacman
+        if minGhostDist is not None and minGhostDist[1] <= 5 and minGhostDist[0].scaredTimer < 5:
+            if len(self.aStarSearch(escape, self.generalHeuristic)) != 0:
+                return self.aStarSearch(escape, gameState, self.generalHeuristic)[0]
+            else:
+                return 'Stop'
+
+        # Return problem
+        # This is problem is chosen when there is 2 food left on map or when time is almost up
+        if len(foodList) < 3 or minHomeBoundaryDist + 60 > gameTimeLeft:
+            if len(self.aStarSearch(returnHome, self.generalHeuristic)) != 0:
+                return self.aStarSearch(returnHome, gameState, self.generalHeuristic)[0]
+            else:
+                return 'Stop'
+
+        # Performs normal food search if no decision is made
+        return self.aStarSearch(food, gameState, self.generalHeuristic)[0]
+
+    def getFeatures(self, gameState, action):
+        features = util.Counter()
+        successor = self.getSuccessor(gameState, action)
+        foodList = self.getFood(successor).asList()
+        features['successorScore'] = -len(foodList)  # self.getScore(successor)
+
+        # Compute distance to the nearest food
+
+        if len(foodList) > 0:  # This should always be True,  but better safe than sorry
+            myPos = successor.getAgentState(self.index).getPosition()
+            minDistance = min([self.getMazeDistance(myPos, food) for food in foodList])
+            features['distanceToFood'] = minDistance
+        return features
+
+    def getWeights(self, gameState, action):
+        return {'successorScore': 100, 'distanceToFood': -1}
+
+
+class PositionSearchProblem:
+    """
+    This class is partly referenced from the PositionSearchProblem class in P1 searchAgent.py.
+    This class acts as a parent class for the rest of the problem class defined below.
+    A search problem defines the state space, start state, goal test, successor
+    function and cost function.  This search problems can be used to find paths
+    to a particular point on the pacman board.
+    """
+
+    def __init__(self, gameState, agentIndex):
+        self.startState = gameState.getAgentState(agentIndex).getPosition()
+        self.walls = gameState.getWalls()
+        self.costFn = lambda x: 1
+        self._visited, self._visitedlist, self._expanded = {}, [], 0
+
+    def getStartState(self):
+        return self.startState
+
+    def isGoalState(self, state):
+        return None
+
+    def getSuccessors(self, state):
+        """
+    Returns successor states, the actions they require, and a cost of 1.
+    For a given state, this should return a list of triples,
+     (successor, action, stepCost), where 'successor' is a
+     successor to the current state, 'action' is the action
+     required to get there, and 'stepCost' is the incremental
+     cost of expanding to that successor
+    """
+        successors = []
+        for action in [Directions.NORTH, Directions.SOUTH, Directions.EAST, Directions.WEST]:
+            x, y = state
+            dx, dy = game.Actions.directionToVector(action)
+            nextx, nexty = int(x + dx), int(y + dy)
+            if not self.walls[nextx][nexty]:
+                nextState = (nextx, nexty)
+                cost = self.costFn(nextState)
+                successors.append((nextState, action, cost))
+
+        # Bookkeeping for display purposes
+        self._expanded += 1  # DO NOT CHANGE
+        if state not in self._visited:
+            self._visited[state] = True
+            self._visitedlist.append(state)
+
+        return successors
+
+    def getCostOfActions(self, actions):
+        """
+    Returns the cost of a particular sequence of actions. If those actions
+    include an illegal move, return 999999.
+    """
+        if actions == None: return 999999
+        x, y = self.getStartState()
+        cost = 0
+        for action in actions:
+            # Check figure out the next state and see whether its' legal
+            dx, dy = game.Actions.directionToVector(action)
+            x, y = int(x + dx), int(y + dy)
+            if self.walls[x][y]: return 999999
+            cost += self.costFn((x, y))
+        return cost
+
+
+class SearchFood(PositionSearchProblem):
+    """
+  This problem defines the position of food or capsule as the goal state
+  """
+
+    def __init__(self, gameState, agent, agentIndex):
+        super().__init__(gameState, agentIndex)
+        self.food = agent.getFood(gameState)
+
+    def isGoalState(self, state):
+        return state in self.food.asList()
+
+
+class SearchOtherFood(PositionSearchProblem):
+    """
+  This problem defines the position of food or capsule as the goal state
+  """
+
+    def __init__(self, gameState, agent, agentIndex, food):
+        super().__init__(gameState, agentIndex)
+        self.food = food
+
+    def isGoalState(self, state):
+        return state in self.food
+
+
+class Return(PositionSearchProblem):
+    """
+  This problem defines the boundary of our side of the map as the goal state
+  """
+
+    def __init__(self, gameState, agent, agentIndex):
+        super().__init__(gameState, agentIndex)
+        self.homeBoundary = agent.boundariesPosition(gameState, 1)
+
+    def isGoalState(self, state):
+        return state in self.homeBoundary
+
+
+class Escape(PositionSearchProblem):
+    """
+  This problem defines the home boundary or nearby capsule as the goal state when being chased by ghosts
+  """
+
+    def __init__(self, gameState, agent, agentIndex):
+        super().__init__(gameState, agentIndex)
+        self.capsule = agent.getCapsules(gameState)
+        self.homeBoundaries = agent.boundariesPosition(gameState, 1)
+
+    def isGoalState(self, state):
+        return state in self.homeBoundaries or state in self.capsule
+
+
+class Capsules(PositionSearchProblem):
+    """
+      This problem defines the capsule as the goal state when being chased by ghosts
+  """
+
+    def __init__(self, gameState, agent, agentIndex):
+        super().__init__(gameState, agentIndex)
+        self.capsules = agent.getCapsules(gameState)
+
+    def isGoalState(self, state):
+        return state in self.capsules
+
+
+class SafeFood(PositionSearchProblem):
+    """
+  This problem defines the food that have more than one direction home as its goal state
+  """
+
+    def __init__(self, gameState, agent, agentIndex):
+        super().__init__(gameState, agentIndex)
+        self.safeFood = agent.safeFood
+
+    def isGoalState(self, state):
+        return state in self.safeFood
+
+
+class Hunter(PositionSearchProblem):
+    """
+      This problem defines the position of Pacman as its goal state
+  """
+
+    def __init__(self, gameState, agent, agentIndex, pacman):
+        super().__init__(gameState, agentIndex)
+        self.pacmanPos = pacman.getPosition()
+
+    def isGoalState(self, state):
+        return state == self.pacmanPos
+
+
+class TakenFood(PositionSearchProblem):
+    """
+          This problem defines the position of the latest food that has been eaten by opponent
+      """
+
+    def __init__(self, gameState, agent, agentIndex):
+        super().__init__(gameState, agentIndex)
+        self.foodPos = agent.taken
+
+    def isGoalState(self, state):
+        return state == self.foodPos
+
+
+class DefensiveReflexAgent(ReflexCaptureAgent):
+    """
+A reflex agent that keeps its side Pacman-free. Again,
+this is to give you an idea of what a defensive agent
+could be like.  It is not the best or only way to make
+such an agent.
+"""
+
+    def chooseAction(self, gameState):
+
+        currSafeFood = [food for food in self.getFood(gameState).asList() if food in self.safeFood]
+        self.safeFood = copy.deepcopy(currSafeFood)
+
+
+        # Calling Getters once for optimisation
+        getGhost = self.getMinGhostDistance(gameState)
+        getPacman = self.getMinPacmanDistance(gameState)
+        getSelf = gameState.getAgentState(self.index)
+        getTime = gameState.data.timeleft
+        getBoundary = self.findMinHomeBoundaryDist(gameState)
+        getTeam = gameState.getAgentState(self.agentsOnTeam[0])
+        getFood = self.getFood(gameState).asList()
+
+
+        # Since we are focusing on collecting food, we need to make sure both agent search effeciently (minimize
+        # overlapping in searching food route). Defensive agent aims to search food that are further from offensive
+        # agent and the radius decrease as the food on the map decreases.
+        if len(getFood) > 20:
+            getotherfood = [food for food in getFood if
+                            self.getMazeDistance(getSelf.getPosition(), food) <= 3 or self.getMazeDistance(
+                                getTeam.getPosition(), food) > 20]
+        elif len(getFood) > 10:
+            getotherfood = [food for food in getFood if
+                            self.getMazeDistance(getSelf.getPosition(), food) <= 3 or self.getMazeDistance(
+                                getTeam.getPosition(), food) > 10]
+        elif len(getFood) > 5:
+            getotherfood = [food for food in getFood if
+                            self.getMazeDistance(getSelf.getPosition(), food) <= 3 or self.getMazeDistance(
+                                getTeam.getPosition(), food) > 5]
+        else:
+            getotherfood = getFood
+
+        otherfood = SearchOtherFood(gameState, self, self.index, getotherfood)
+
+        # Make sure there is a Previous Observation before checking if food has been taken
+        if getTime < 1195:
+            getFoodtaken = self.getMinFoodTakenDistance(gameState)
+            if getFoodtaken != None:
+                self.taken = getFoodtaken  # Location of food most recently taken by enemy
+
+            # Resets food taken to None if the enemy team manages to deposit food
+            # or if you reach the location of that food
+            if self.getScore(gameState) < self.getScore(self.getPreviousObservation()) or \
+                    self.taken != None and getSelf.getPosition() == self.taken:
+                self.taken = None
+
+        # Hunter problem (Hunt Pacman if offensive ghost)
+        if getPacman != None and getPacman[1] <= 5 and getSelf.scaredTimer <= 0:
+            # print("Hunt Pacman")
+            return self.aStarSearch(Hunter(gameState, self, self.index, getPacman[0]), gameState)[0]
+
+        # Hunter problem (Hunt Ghost if offensive Pacman)
+        if getGhost != None and getGhost[0].scaredTimer > 4 and getGhost[1] <= 4:
+            # print("Hunt Ghost")
+            return self.aStarSearch(Hunter(gameState, self, self.index, getGhost[0]), gameState)[0]
+
+        # Search Taken Food Problem
+        if self.taken != None and getSelf.getPosition() != self.taken and \
+                getSelf.scaredTimer <= 5:
+                return self.aStarSearch(TakenFood(gameState, self, self.index), gameState, self.generalHeuristic)[0]
+
+        # Escape problem
+        if self.getMinGhostDistance(gameState) != None and self.getMinGhostDistance(gameState)[1] < 5 and \
+                self.getMinGhostDistance(gameState)[
+                    0].scaredTimer <= 4:
+            if len(self.aStarSearch(Escape(gameState, self, self.index), self.generalHeuristic)) != 0:
+                return self.aStarSearch(Escape(gameState, self, self.index), gameState, self.generalHeuristic)[0]
+            else:
+                return 'Stop'
+
+        # Return problem
+        if len(self.getFood(gameState).asList()) < 3 \
+                or getBoundary + 60 > getTime:
+            # Change to only call aStarSearch once (For optimisation).
+            action = self.aStarSearch(Return(gameState, self, self.index), gameState, self.generalHeuristic)
+            if len(action) != 0:
+                # print("Return")
+                return action[0]
+            else:
+                return 'Stop'
+
+        # Search other food problem
+        action = self.aStarSearch(otherfood, gameState, self.generalHeuristic)
+        if len(action) != 0:
+            return action[0]
+
+        # Search Food problem
+        retSafeFoodAStar = self.aStarSearch(SearchFood(gameState, self, self.index), gameState, self.generalHeuristic)
+        return retSafeFoodAStar[0]
+
+    def getFeatures(self, gameState, action):
+        features = util.Counter()
+        successor = self.getSuccessor(gameState, action)
+        foodList = self.getFood(successor).asList()
+        myState = successor.getAgentState(self.index)
+        myPos = myState.getPosition()
+
+        # Computes whether we're on defense (1) or offense (0)
+        features['onDefense'] = 1
+        if myState.isPacman: features['onDefense'] = 0
+
+        # Computes distance to invaders we can see
+        enemies = [successor.getAgentState(i) for i in self.getOpponents(successor)]
+        invaders = [a for a in enemies if a.isPacman and a.getPosition() != None]
+        features['numInvaders'] = len(invaders)
+        if len(invaders) > 0:
+            dists = [self.getMazeDistance(myPos, a.getPosition()) for a in invaders]
+            features['invaderDistance'] = min(dists)
+
+        if len(foodList) > 0:  # This should always be True,  but better safe than sorry
+            myPos = successor.getAgentState(self.index).getPosition()
+            minDistance = min([self.getMazeDistance(myPos, food) for food in foodList])
+            features['distanceToFood'] = minDistance
+        return features
+
+    def getWeights(self, gameState, action):
+        return {'numInvaders': -1000, 'onDefense': 100, 'invaderDistance': -10, 'stop': -100, 'reverse': -2}
+
+
+class BFS:
+    """
+This class is used to explore the map when ghost position can be ignored.
+"""
+
+    def __init__(self, gameState, agent):
+
+        self.food = agent.getFood(gameState).asList()
+        self.walls = gameState.getWalls()
+        self.homeBoundaries = agent.boundariesPosition(gameState, 1)
+        self.costFn = lambda x: 1
+        self._visited, self._visitedlist, self._expanded = {}, [], 0
+
+    def Search(self, startState, stateReached, goalState):
+        """
+  This a geneal BFS search method
+  """
+        frontier = util.Queue()
+        frontier.push((startState, [], 0))
+        # check goal state
+        if startState in goalState:
+            return []
+        while not frontier.isEmpty():
+            currState, actions, totalCost = frontier.pop()
+            # expand successors
+            successors = self.getSuccessors(currState)
+            for (nextState, direction, cost) in successors:
+                # check goal state
+                if nextState in goalState:
+                    return actions + [direction]
+                # add to frontier if node has not been visited
+                if nextState not in stateReached:
+                    stateReached.append(nextState)
+                    frontier.push((nextState, actions + [direction], totalCost + cost))
+
+    def getSuccessors(self, state):
+        """
+  This function is from P1 searchAgent.py
+  Returns successor states, the actions they require, and a cost of 1.
+  For a given state, this should return a list of triples,
+   (successor, action, stepCost), where 'successor' is a
+   successor to the current state, 'action' is the action
+   required to get there, and 'stepCost' is the incremental
+   cost of expanding to that successor
+  """
+        successors = []
+        for action in [Directions.NORTH, Directions.SOUTH, Directions.EAST, Directions.WEST]:
+            x, y = state
+            dx, dy = game.Actions.directionToVector(action)
+            nextx, nexty = int(x + dx), int(y + dy)
+            if not self.walls[nextx][nexty]:
+                nextState = (nextx, nexty)
+                cost = self.costFn(nextState)
+                successors.append((nextState, action, cost))
+
+        # Bookkeeping for display purposes
+        self._expanded += 1  # DO NOT CHANGE
+        if state not in self._visited:
+            self._visited[state] = True
+            self._visitedlist.append(state)
+
+        return successors
+
+
+    def getNumOfValidDirectionBackHome(self, food):
+        """
+    We use BFS search to indicate whether all the legal neighbors of the food eventually lead the pacman back home.
+    This method aims to identify food that are located in alleys that have dead end.
+    """
+        count = 0
+        stateReached = []
+        stateReached.append(food)
+
+        # get all legal next state (last state is the state checked)
+        legalNeighbors = Actions.getLegalNeighbors(food, self.walls)
+        for legalNeighbor in legalNeighbors[:-1]:
+            closed = copy.deepcopy(stateReached)
+            if self.Search(legalNeighbor, closed, self.homeBoundaries):
+                count += 1
+
+        return count
+
+    def getSafeFood(self, food):
+        """
+    Return a list of safe food
+    """
+        safeFood = []
+        for f in food:
+            count = self.getNumOfValidDirectionBackHome(f)
+            if count > 1:
+                safeFood.append(f)
+        return safeFood
